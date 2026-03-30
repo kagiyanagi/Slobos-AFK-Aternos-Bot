@@ -1,35 +1,25 @@
 {
   "name": "AFK Bot",
-
   "bot-account": {
-    "username": "Slobot00",
+    "username": "bhai",
     "password": "",
     "type": "offline"
   },
-
   "server": {
     "ip": "kagiyanagi.aternos.me",
     "port": 14021,
     "version": false,
     "try-creative": false
   },
-
   "position": {
     "enabled": false,
     "x": 0,
     "y": 64,
     "z": 0
   },
-
   "utils": {
-    "auto-auth": {
-      "enabled": true,
-      "password": "jaj1234jaj"
-    },
-    "anti-afk": {
-      "enabled": true,
-      "sneak": true
-    },
+    "auto-auth": { "enabled": false, "password": "" },
+    "anti-afk":  { "enabled": true,  "sneak": false },
     "chat-messages": {
       "enabled": true,
       "repeat": true,
@@ -62,7 +52,7 @@
         "Just vibing in the Nether.",
         "Lost all my stuff, nice.",
         "Parkour skills = 0",
-        "Totally didn’t cheat that in.",
+        "Totally didn't cheat that in.",
         "One heart clutch incoming!",
         "Just exploring... and dying.",
         "This is fine 🔥",
@@ -82,11 +72,10 @@
     "auto-reconnect-delay": 3000,
     "max-reconnect-delay": 120000
   },
-
   "movement": {
     "enabled": true,
     "circle-walk": {
-      "enabled": true,
+      "enabled": false,
       "radius": 4,
       "speed": 3000
     },
@@ -99,26 +88,22 @@
       "interval": 10000
     }
   },
-
   "modules": {
-    "avoidMobs": true,
-    "combat": true,
+    "avoidMobs": false,
+    "combat": false,
     "beds": true,
     "chat": true,
     "console-commands": true
   },
-
   "combat": {
-    "attack-mobs": true,
-    "auto-eat": true
+    "attack-mobs": false,
+    "auto-eat": false
   },
-
   "beds": {
-    "pick-up-day": true,
+    "pick-up-day": false,
     "place-night": true,
     "max-search-distance": 32
   },
-
   "discord": {
     "enabled": false,
     "webhookUrl": "YOUR_DISCORD_WEBHOOK_URL_HERE",
@@ -128,7 +113,6 @@
       "chat": false
     }
   },
-
   "chat": {
     "respond": false
   }
