@@ -8,7 +8,7 @@
   "server": {
     "ip": "elver.aternos.host",
     "port": 14021,
-    "version": "",
+    "version": "1.21.11",
     "try-creative": false
   },
   "position": {
