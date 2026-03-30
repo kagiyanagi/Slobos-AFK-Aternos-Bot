@@ -599,19 +599,77 @@ function modCombat(bot, mcData) {
 }
 
 function modBeds(bot) {
-  let sleeping = false;
+  let sleeping     = false;
+  let wakeWatchdog = null;
+  const maxDist    = config.beds?.["max-search-distance"] || 32;
+
+  // Once night is skipped, wake the bot after a short delay
+  function scheduleWake() {
+    if (wakeWatchdog) clearTimeout(wakeWatchdog);
+    wakeWatchdog = setTimeout(async () => {
+      if (!bot || !botState.connected || !sleeping) return;
+      try {
+        await bot.wake();
+        addLog("[Bed] Woke up (day)");
+      } catch (e) {
+        addLog(`[Bed] Wake error: ${e.message}`);
+      } finally {
+        sleeping = false;
+        wakeWatchdog = null;
+      }
+    }, 12000);
+  }
+
+  // Try to sleep every 10s during night
   addInterval(async () => {
-    if (!bot || !botState.connected || !config.beds["place-night"] || sleeping) return;
+    if (!bot || !botState.connected) return;
+    if (!config.beds?.["place-night"]) return;
+    if (sleeping) return;
+
+    const tod     = bot.time.timeOfDay;
+    const isNight = tod >= 12541 && tod <= 23458;
+    if (!isNight) return;
+
+    const bed = bot.findBlock({
+      matching:     b => b.name.includes("bed"),
+      maxDistance:  maxDist,
+      useExtraInfo: false,
+    });
+    if (!bed) {
+      addLog(`[Bed] No bed within ${maxDist} blocks — can't sleep`);
+      return;
+    }
+
+    sleeping = true;
     try {
-      if (bot.time.timeOfDay < 12500 || bot.time.timeOfDay > 23500) return;
-      const bed = bot.findBlock({ matching: b => b.name.includes("bed"), maxDistance: 8 });
-      if (!bed) return;
-      sleeping = true;
-      try { await bot.sleep(bed); addLog("[Bed] Sleeping..."); }
-      catch (_) {}
-      finally { sleeping = false; }
-    } catch (e) { sleeping = false; addLog(`[Bed] ${e.message}`); }
+      await bot.sleep(bed);
+      addLog("[Bed] Bot is sleeping");
+      scheduleWake();
+    } catch (e) {
+      const msg = e.message || String(e);
+      if (/already sleep/i.test(msg)) {
+        // Another player triggered the skip — we still need to wake after
+        addLog("[Bed] Night already being skipped by another player");
+        scheduleWake();
+      } else if (/can't sleep|not a bed/i.test(msg)) {
+        addLog(`[Bed] Can't sleep right now: ${msg}`);
+        sleeping = false;
+      } else {
+        addLog(`[Bed] Sleep error: ${msg}`);
+        sleeping = false;
+      }
+    }
   }, 10000);
+
+  // Failsafe: sync our flag with mineflayer's actual state
+  addInterval(() => {
+    if (!bot || !botState.connected) return;
+    if (sleeping && !bot.isSleeping) {
+      addLog("[Bed] Sleep state desynced — resetting");
+      sleeping = false;
+      if (wakeWatchdog) { clearTimeout(wakeWatchdog); wakeWatchdog = null; }
+    }
+  }, 15000);
 }
 
 function modChat(bot) {

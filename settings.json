@@ -65,7 +65,7 @@
   "modules": {
     "avoidMobs": false,
     "combat": false,
-    "beds": false,
+    "beds": true,
     "chat": false,
     "console-commands": true
   },
@@ -77,7 +77,8 @@
 
   "beds": {
     "pick-up-day": false,
-    "place-night": false
+    "place-night": true,
+    "max-search-distance": 32
   },
 
   "discord": {
