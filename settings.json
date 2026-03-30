@@ -23,20 +23,58 @@
 
   "utils": {
     "auto-auth": {
-      "enabled": false,
-      "password": ""
+      "enabled": true,
+      "password": "jaj1234jaj"
     },
     "anti-afk": {
       "enabled": true,
-      "sneak": false
+      "sneak": true
     },
     "chat-messages": {
-      "enabled": false,
+      "enabled": true,
       "repeat": true,
       "repeat-delay": 180,
       "messages": [
         "Just hanging out!",
-        "Having a great time on this server."
+        "Having a great time on this server.",
+        "Definitely not stealing your diamonds 👀",
+        "Mining straight down like a pro.",
+        "Creeper? Aww man...",
+        "Just one more block... okay maybe 100 more.",
+        "Building something cool (trust me bro).",
+        "Lost in a cave for the 5th time.",
+        "Who needs sleep when you have redstone?",
+        "Accidentally punched a villager again.",
+        "Running from mobs like it's cardio.",
+        "AFK but still judging your build.",
+        "Totally knows what they're doing.",
+        "Searching for diamonds since 2012.",
+        "That wasn't lava… oh wait.",
+        "Fell into the void (again).",
+        "Speedrunning bad decisions.",
+        "Just farming... not your stuff tho.",
+        "Why is there a creeper behind me?",
+        "Pro builder (in creative only).",
+        "Trying not to rage quit.",
+        "This base is temporary... for 3 months now.",
+        "Villagers hate me for no reason.",
+        "Redstone broke again 💀",
+        "Just vibing in the Nether.",
+        "Lost all my stuff, nice.",
+        "Parkour skills = 0",
+        "Totally didn’t cheat that in.",
+        "One heart clutch incoming!",
+        "Just exploring... and dying.",
+        "This is fine 🔥",
+        "Mining for diamonds, finding disappointment.",
+        "Trust me, this will look good later.",
+        "Not lost, just... exploring inefficiently.",
+        "I swear I had full armor a minute ago.",
+        "Who placed this lava here??",
+        "Just a peaceful day… *explosion*",
+        "Grinding XP like my life depends on it.",
+        "I hear skeletons... I don't like it.",
+        "Building a house I'll never finish."
       ]
     },
     "chat-log": true,
@@ -57,26 +95,26 @@
       "interval": 5000
     },
     "random-jump": {
-      "enabled": false,
+      "enabled": true,
       "interval": 10000
     }
   },
 
   "modules": {
-    "avoidMobs": false,
-    "combat": false,
+    "avoidMobs": true,
+    "combat": true,
     "beds": true,
-    "chat": false,
+    "chat": true,
     "console-commands": true
   },
 
   "combat": {
-    "attack-mobs": false,
-    "auto-eat": false
+    "attack-mobs": true,
+    "auto-eat": true
   },
 
   "beds": {
-    "pick-up-day": false,
+    "pick-up-day": true,
     "place-night": true,
     "max-search-distance": 32
   },
