@@ -6,8 +6,8 @@
     "type": "offline"
   },
   "server": {
-    "ip": "slobtest1.aternos.me",
-    "port": 27586,
+    "ip": "kagiyanagi.aternos.me",
+    "port": 14021,
     "version": "",
     "try-creative": false
   },
