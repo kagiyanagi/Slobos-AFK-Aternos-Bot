@@ -1,46 +1,50 @@
 {
   "name": "AFK Bot",
+
   "bot-account": {
     "username": "Slobot00",
     "password": "",
     "type": "offline"
   },
+
   "server": {
     "ip": "kagiyanagi.aternos.me",
     "port": 14021,
     "version": false,
     "try-creative": false
   },
+
   "position": {
-    "enabled": true,
+    "enabled": false,
     "x": 0,
-    "y": 100,
+    "y": 64,
     "z": 0
   },
+
   "utils": {
     "auto-auth": {
-      "enabled": true,
-      "password": "chalol78"
+      "enabled": false,
+      "password": ""
     },
     "anti-afk": {
       "enabled": true,
-      "sneak": true
+      "sneak": false
     },
     "chat-messages": {
-      "enabled": true,
+      "enabled": false,
       "repeat": true,
-      "repeat-delay": 120,
+      "repeat-delay": 180,
       "messages": [
-        "I'm a regular player",
-        "Subscribe to Slobos",
-        "I like to play Minecraft!"
+        "Just hanging out!",
+        "Having a great time on this server."
       ]
     },
     "chat-log": true,
     "auto-reconnect": true,
-    "auto-reconnect-delay": 2000,
+    "auto-reconnect-delay": 3000,
     "max-reconnect-delay": 120000
   },
+
   "movement": {
     "enabled": true,
     "circle-walk": {
@@ -53,25 +57,29 @@
       "interval": 5000
     },
     "random-jump": {
-      "enabled": true,
+      "enabled": false,
       "interval": 10000
     }
   },
+
   "modules": {
-    "avoidMobs": true,
-    "combat": true,
-    "beds": true,
-    "chat": true,
+    "avoidMobs": false,
+    "combat": false,
+    "beds": false,
+    "chat": false,
     "console-commands": true
   },
+
   "combat": {
-    "attack-mobs": true,
-    "auto-eat": true
+    "attack-mobs": false,
+    "auto-eat": false
   },
+
   "beds": {
-    "pick-up-day": true,
-    "place-night": true
+    "pick-up-day": false,
+    "place-night": false
   },
+
   "discord": {
     "enabled": false,
     "webhookUrl": "YOUR_DISCORD_WEBHOOK_URL_HERE",
@@ -81,7 +89,8 @@
       "chat": false
     }
   },
+
   "chat": {
-    "respond": true
+    "respond": false
   }
 }
