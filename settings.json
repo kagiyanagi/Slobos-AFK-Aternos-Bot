@@ -6,7 +6,7 @@
     "type": "offline"
   },
   "server": {
-    "ip": "kagiyanagi.aternos.me",
+    "ip": "elver.aternos.host",
     "port": 14021,
     "version": "",
     "try-creative": false
