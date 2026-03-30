@@ -6,7 +6,7 @@
     "type": "offline"
   },
   "server": {
-    "ip": "kagiyanagi.aternos.me",
+    "ip": "jewelfish.aternos.host",
     "port": 14021,
     "version": false,
     "try-creative": false
