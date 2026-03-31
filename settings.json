@@ -101,20 +101,20 @@
   },
 
   "modules": {
-    "avoidMobs": false,
-    "combat": false,
+    "avoidMobs": true,
+    "combat": true,
     "beds": true,
     "chat": true,
     "console-commands": true
   },
 
   "combat": {
-    "attack-mobs": false,
-    "auto-eat": false
+    "attack-mobs": true,
+    "auto-eat": true
   },
 
   "beds": {
-    "pick-up-day": false,
+    "pick-up-day": true,
     "place-night": true,
     "max-search-distance": 16
   },
