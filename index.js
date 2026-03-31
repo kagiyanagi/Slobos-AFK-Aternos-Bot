@@ -1,42 +1,58 @@
 "use strict";
 
 // ============================================================
-// LOAD CONFIG — env vars override settings.json for secrets.
-// Set BOT_USERNAME, AUTH_PASSWORD, MC_HOST, MC_PORT in your
-// hosting dashboard. Never commit real passwords to GitHub.
+//  Minecraft AFK Bot v2.7
+//  - Rewrote movement to use ONLY safe anti-AFK actions
+//  - 3-second spawn delay before any modules start
+//  - Anti-knockback: stops all controls when bot takes damage
+//  - Bed spam logging reduced to once per night cycle
+//  - Groq AI chat (set GROQ_API_KEY env var to enable)
+//  - Combat + avoidMobs removed — both cause invalid movement
 // ============================================================
-const { addLog, getLogs } = require("./logger");
-const mineflayer         = require("mineflayer");
-const { Movements, pathfinder, goals } = require("mineflayer-pathfinder");
-const { GoalBlock }      = goals;
-const express            = require("express");
-const http               = require("http");
-const https              = require("https");
-const readline           = require("readline");
 
+const { addLog, getLogs } = require("./logger");
+const mineflayer          = require("mineflayer");
+const { Movements, pathfinder, goals: { GoalBlock } } = require("mineflayer-pathfinder");
+const express             = require("express");
+const http                = require("http");
+const https               = require("https");
+const readline            = require("readline");
+
+// ============================================================
+// CONFIG — env vars override settings.json for secrets
+// ============================================================
 const config = require("./settings.json");
 
-// Env-var overrides (secrets stay out of git)
-config["bot-account"].username = process.env.BOT_USERNAME || config["bot-account"].username;
-config["bot-account"].password = process.env.BOT_PASSWORD || config["bot-account"].password || undefined;
-config.server.ip   = process.env.MC_HOST || config.server.ip;
+config["bot-account"].username =
+  process.env.BOT_USERNAME || config["bot-account"].username;
+config["bot-account"].password =
+  process.env.BOT_PASSWORD || config["bot-account"].password || undefined;
+config.server.ip   = process.env.MC_HOST  || config.server.ip;
 config.server.port = Number(process.env.MC_PORT) || config.server.port;
+
 if (config.utils["auto-auth"]) {
   config.utils["auto-auth"].password =
     process.env.AUTH_PASSWORD || config.utils["auto-auth"].password || "";
 }
 if (config.discord?.webhookUrl) {
-  config.discord.webhookUrl = process.env.DISCORD_WEBHOOK || config.discord.webhookUrl;
+  config.discord.webhookUrl =
+    process.env.DISCORD_WEBHOOK || config.discord.webhookUrl;
 }
 
+// Optional Groq AI — set GROQ_API_KEY in Railway env vars
+const GROQ_KEY = process.env.GROQ_API_KEY || "";
+
 // ============================================================
-// STARTUP VALIDATION — crash early with a clear message
+// STARTUP VALIDATION
 // ============================================================
 function validateConfig() {
   const errs = [];
-  if (!config.server.ip || config.server.ip === "YOUR_SERVER_IP")   errs.push("server.ip is not set");
-  if (!config.server.port || config.server.port <= 0)               errs.push("server.port is invalid");
-  if (!config["bot-account"].username)                              errs.push("bot-account.username is not set");
+  if (!config.server.ip || config.server.ip === "YOUR_SERVER_IP")
+    errs.push("server.ip is not set");
+  if (!config.server.port || config.server.port <= 0)
+    errs.push("server.port is invalid");
+  if (!config["bot-account"].username)
+    errs.push("bot-account.username is not set");
   if (errs.length) {
     errs.forEach(e => addLog(`[Config] ERROR: ${e}`));
     addLog("[Config] Fix settings.json or env vars, then restart.");
@@ -49,23 +65,21 @@ function validateConfig() {
 // ============================================================
 const app  = express();
 app.use(express.json());
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 8080;
 
 let botState = {
-  connected:        false,
-  lastActivity:     Date.now(),
+  connected:         false,
+  lastActivity:      Date.now(),
   reconnectAttempts: 0,
-  startTime:        Date.now(),
-  errors:           [],
-  wasThrottled:     false,
+  startTime:         Date.now(),
+  errors:            [],
+  wasThrottled:      false,
 };
 
-// ---- Routes ----
-
-app.get("/",        (req, res) => res.send(dashboardHTML()));
-app.get("/tutorial",(req, res) => res.send(tutorialHTML()));
-app.get("/logs",    (req, res) => res.send(logsHTML()));
-app.get("/ping",    (req, res) => res.send("pong"));
+app.get("/",         (req, res) => res.send(dashboardHTML()));
+app.get("/tutorial", (req, res) => res.send(tutorialHTML()));
+app.get("/logs",     (req, res) => res.send(logsHTML()));
+app.get("/ping",     (req, res) => res.send("pong"));
 
 app.get("/health", (req, res) => {
   res.json({
@@ -74,6 +88,7 @@ app.get("/health", (req, res) => {
     coords:            bot?.entity ? bot.entity.position : null,
     reconnectAttempts: botState.reconnectAttempts,
     memoryMB:          (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2),
+    groqEnabled:       !!GROQ_KEY,
   });
 });
 
@@ -96,7 +111,16 @@ app.post("/stop", (req, res) => {
   res.json({ success: true });
 });
 
+// Simple per-IP rate limit on commands (10 req/min)
+const cmdTimes = new Map();
 app.post("/command", (req, res) => {
+  const ip  = req.ip;
+  const now = Date.now();
+  const hits = (cmdTimes.get(ip) || []).filter(t => now - t < 60000);
+  if (hits.length >= 10) return res.json({ success: false, msg: "Rate limited." });
+  hits.push(now);
+  cmdTimes.set(ip, hits);
+
   const cmd = (req.body.command || "").trim();
   if (!cmd) return res.json({ success: false, msg: "Empty command." });
   addLog(`[Console] > ${cmd}`);
@@ -104,38 +128,34 @@ app.post("/command", (req, res) => {
   if (cmd === "/help") {
     const lines = [
       "Available commands:",
-      "  /help    - Show this help",
+      "  /help    - Show this message",
       "  /pos     - Bot coordinates",
-      "  /status  - Connection status",
-      "  /list    - Player list",
+      "  /status  - Connection status + uptime",
+      "  /list    - Ask server for player list",
       "  /say <m> - Send chat message",
     ];
     lines.forEach(l => addLog(`[Console] ${l}`));
     return res.json({ success: true, msg: lines.join("\n") });
   }
-
   if (cmd === "/pos" || cmd === "/coords") {
-    const pos = bot?.entity?.position;
-    const msg = pos
-      ? `X=${Math.floor(pos.x)}  Y=${Math.floor(pos.y)}  Z=${Math.floor(pos.z)}`
+    const p   = bot?.entity?.position;
+    const msg = p
+      ? `X=${Math.floor(p.x)}  Y=${Math.floor(p.y)}  Z=${Math.floor(p.z)}`
       : "Position unavailable.";
     addLog(`[Console] ${msg}`);
     return res.json({ success: true, msg });
   }
-
   if (cmd === "/status") {
     const up  = Math.floor((Date.now() - botState.startTime) / 1000);
     const msg = `${botState.connected ? "Connected" : "Disconnected"} | ${fmtUptime(up)} | Reconnects: ${botState.reconnectAttempts}`;
     addLog(`[Console] ${msg}`);
     return res.json({ success: true, msg });
   }
-
   if (!bot || !botState.connected) {
     const msg = "Bot is not connected — try again in a moment.";
     addLog(`[Console] ${msg}`);
     return res.json({ success: false, msg });
   }
-
   try {
     bot.chat(cmd);
     addLog(`[Console] Sent: ${cmd}`);
@@ -146,15 +166,13 @@ app.post("/command", (req, res) => {
   }
 });
 
-// Start HTTP server
 const httpServer = app.listen(PORT, "0.0.0.0", () =>
   addLog(`[Server] HTTP server started on port ${httpServer.address().port}`)
 );
 httpServer.on("error", err => {
   if (err.code === "EADDRINUSE") {
-    const fb = PORT + 1;
-    addLog(`[Server] Port ${PORT} in use — trying ${fb}`);
-    httpServer.listen(fb, "0.0.0.0");
+    addLog(`[Server] Port ${PORT} in use — trying ${PORT + 1}`);
+    httpServer.listen(PORT + 1, "0.0.0.0");
   } else {
     addLog(`[Server] Error: ${err.message}`);
   }
@@ -164,7 +182,9 @@ httpServer.on("error", err => {
 // UTILITIES
 // ============================================================
 function fmtUptime(s) {
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const h   = Math.floor(s / 3600);
+  const m   = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
   if (h > 0) return `${h}h ${m}m ${sec}s`;
   if (m > 0) return `${m}m ${sec}s`;
   return `${sec}s`;
@@ -172,28 +192,30 @@ function fmtUptime(s) {
 
 function escHTML(str) {
   return str.replace(/[&<>"']/g, m =>
-    ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" })[m]
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[m]
   );
 }
 
 // ============================================================
-// SELF-PING — keeps Render free tier awake
+// SELF-PING — works on Render and Railway
 // ============================================================
 function startSelfPing() {
-  const url = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
+  const url =
+    process.env.RENDER_EXTERNAL_URL ||
+    process.env.APP_URL             ||
+    process.env.RAILWAY_STATIC_URL;
   if (!url) {
-    addLog("[KeepAlive] No RENDER_EXTERNAL_URL/APP_URL — self-ping disabled");
+    addLog("[KeepAlive] No APP_URL set — self-ping disabled");
     return;
   }
   setInterval(() => {
     const proto = url.startsWith("https") ? https : http;
     proto.get(`${url}/ping`, () => {}).on("error", e =>
-      addLog(`[KeepAlive] Self-ping failed: ${e.message}`)
+      addLog(`[KeepAlive] Ping failed: ${e.message}`)
     );
   }, 10 * 60 * 1000);
   addLog("[KeepAlive] Self-ping started (every 10 min)");
 }
-
 startSelfPing();
 
 // Memory monitor
@@ -204,11 +226,11 @@ setInterval(() => {
 // ============================================================
 // BOT STATE
 // ============================================================
-let bot               = null;
-let activeIntervals   = [];
-let reconnectTimer    = null;
-let connectionTimer   = null;
-let isReconnecting    = false;
+let bot             = null;
+let activeIntervals = [];
+let reconnectTimer  = null;
+let connectionTimer = null;
+let isReconnecting  = false;
 
 function clearTimers() {
   if (reconnectTimer)  { clearTimeout(reconnectTimer);  reconnectTimer  = null; }
@@ -217,12 +239,19 @@ function clearTimers() {
 
 function clearAllIntervals() {
   addLog(`[Cleanup] Clearing ${activeIntervals.length} intervals`);
-  activeIntervals.forEach(id => clearInterval(id));
+  activeIntervals.forEach(id => { try { clearInterval(id); clearTimeout(id); } catch (_) {} });
   activeIntervals = [];
 }
 
 function addInterval(cb, ms) {
   const id = setInterval(cb, ms);
+  activeIntervals.push(id);
+  return id;
+}
+
+function addDelayedTimeout(cb, ms) {
+  // Tracked so clearAllIntervals() also cancels pending timeouts
+  const id = setTimeout(cb, ms);
   activeIntervals.push(id);
   return id;
 }
@@ -236,13 +265,22 @@ function getReconnectDelay() {
   if (botState.wasThrottled) {
     botState.wasThrottled = false;
     const d = 60000 + Math.floor(Math.random() * 60000);
-    addLog(`[Bot] Throttle delay: ${(d/1000).toFixed(0)}s`);
+    addLog(`[Bot] Throttle delay: ${(d / 1000).toFixed(0)}s`);
     return d;
   }
   const base = config.utils["auto-reconnect-delay"] || 3000;
   const max  = config.utils["max-reconnect-delay"]  || 120000;
-  const d    = Math.min(base * Math.pow(2, botState.reconnectAttempts), max);
+  // Exponential backoff capped at 6 attempts
+  const d = Math.min(base * Math.pow(2, Math.min(botState.reconnectAttempts, 6)), max);
   return d + Math.floor(Math.random() * 2000);
+}
+
+// Stop every movement control immediately — used on damage + cleanup
+function stopAllMovement() {
+  if (!bot) return;
+  ["forward", "back", "left", "right", "jump", "sprint", "sneak"].forEach(s => {
+    try { bot.setControlState(s, false); } catch (_) {}
+  });
 }
 
 // ============================================================
@@ -257,13 +295,16 @@ function createBot() {
     bot = null;
   }
 
-  addLog(`[Bot] Creating bot instance...`);
+  addLog("[Bot] Creating bot instance...");
   addLog(`[Bot] Connecting to ${config.server.ip}:${config.server.port}`);
 
   try {
-    const version = config.server.version && String(config.server.version).trim() !== "" && config.server.version !== false
-      ? config.server.version
-      : false;
+    const version =
+      config.server.version &&
+      String(config.server.version).trim() !== "" &&
+      config.server.version !== false
+        ? config.server.version
+        : false;
 
     bot = mineflayer.createBot({
       username:             config["bot-account"].username,
@@ -278,7 +319,7 @@ function createBot() {
 
     bot.loadPlugin(pathfinder);
 
-    // Aternos can take 90-120s to fully spawn a player
+    // 150s connection timeout — Aternos can be slow to spawn players
     clearTimers();
     connectionTimer = setTimeout(() => {
       if (!botState.connected) {
@@ -293,7 +334,7 @@ function createBot() {
 
     bot.once("spawn", () => {
       if (spawnHandled) return;
-      spawnHandled = true;
+      spawnHandled               = true;
       clearTimers();
       botState.connected         = true;
       botState.lastActivity      = Date.now();
@@ -303,20 +344,53 @@ function createBot() {
       addLog(`[Bot] [+] Spawned! Version: ${bot.version}`);
       sendDiscord(`[+] **Connected** to \`${config.server.ip}\``, 0x4ade80);
 
-      const mcData     = require("minecraft-data")(bot.version);
-      const defMoves   = new Movements(bot, mcData);
+      const mcData   = require("minecraft-data")(bot.version);
+      const defMoves = new Movements(bot, mcData);
+      // Conservative movement settings to avoid anti-cheat
       defMoves.allowFreeMotion = false;
       defMoves.canDig          = false;
-      defMoves.liquidCost      = 1000;
-      defMoves.fallDamageCost  = 1000;
+      defMoves.sprinting       = false; // walk speed only — sprinting looks suspicious
+      defMoves.maxDropDown     = 0;     // never jump off ledges
+      defMoves.liquidCost      = 9999;
+      defMoves.fallDamageCost  = 9999;
+      bot.pathfinder.setMovements(defMoves);
 
-      initModules(bot, mcData, defMoves);
+      // Navigate to fixed position if configured (one-time, then stops)
+      if (config.position?.enabled) {
+        bot.pathfinder.setGoal(
+          new GoalBlock(config.position.x, config.position.y, config.position.z)
+        );
+        addLog("[Position] Navigating to configured position...");
+      }
 
       if (config.server["try-creative"]) {
         setTimeout(() => {
           if (bot && botState.connected) bot.chat("/gamemode creative");
-        }, 3000);
+        }, 4000);
       }
+
+      // *** KEY FIX: 3-second delay before any modules start ***
+      // Gives the server time to finish loading the player so the
+      // first movement packet doesn't trigger invalid_player_movement.
+      addLog("[Modules] Waiting 3s before initializing...");
+      addDelayedTimeout(() => {
+        if (!bot || !botState.connected) return;
+        addLog("[Modules] Initializing...");
+        initModules(bot, mcData, defMoves);
+        addLog("[Modules] All initialized!");
+      }, 3000);
+    });
+
+    // *** KEY FIX: Anti-knockback ***
+    // When bot takes damage, stop ALL movement immediately.
+    // Previously the bot would try to flee via pathfinder, causing
+    // invalid movement packets that got it kicked.
+    bot.on("entityHurt", entity => {
+      if (!bot || entity !== bot.entity) return;
+      stopAllMovement();
+      // Also stop pathfinder if it's running
+      try { bot.pathfinder.setGoal(null); } catch (_) {}
+      addLog("[AntiKnockback] Took damage — movement stopped");
     });
 
     bot.on("kicked", reason => {
@@ -325,12 +399,13 @@ function createBot() {
       botState.connected = false;
       pushError("kicked", r);
       clearAllIntervals();
+      stopAllMovement();
       if (/throttl|wait before reconnect|too fast/i.test(String(r))) {
         botState.wasThrottled = true;
-        addLog("[Bot] Throttle kick — extended delay will apply");
+        addLog("[Bot] Throttle kick — extended delay applied");
       }
       sendDiscord(`[!] **Kicked**: ${r}`, 0xff0000);
-      // 'end' fires right after and triggers reconnect
+      // "end" fires right after and triggers reconnect
     });
 
     bot.on("end", reason => {
@@ -345,7 +420,7 @@ function createBot() {
     bot.on("error", err => {
       addLog(`[Bot] Error: ${err.message}`);
       pushError("error", err.message);
-      // 'end' handles reconnect after this
+      // "end" handles reconnect after this
     });
 
   } catch (err) {
@@ -364,7 +439,7 @@ function scheduleReconnect() {
   isReconnecting = true;
   botState.reconnectAttempts++;
   const delay = getReconnectDelay();
-  addLog(`[Bot] Reconnecting in ${(delay/1000).toFixed(1)}s (attempt #${botState.reconnectAttempts})`);
+  addLog(`[Bot] Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt #${botState.reconnectAttempts})`);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     isReconnecting = false;
@@ -376,26 +451,21 @@ function scheduleReconnect() {
 // MODULE INITIALIZATION
 // ============================================================
 function initModules(bot, mcData, defMoves) {
-  addLog("[Modules] Initializing...");
   const cfg = config;
 
-  // Auto-auth
+  // --- Auto-auth ---
   if (cfg.utils["auto-auth"]?.enabled) {
     const pw = cfg.utils["auto-auth"].password;
     if (!pw) {
-      addLog("[Auth] WARNING: auto-auth enabled but password is empty");
+      addLog("[Auth] WARNING: auto-auth enabled but password is empty — skipping");
     } else {
       let done = false;
       const tryAuth = type => {
         if (done || !botState.connected) return;
         done = true;
-        if (type === "register") {
-          bot.chat(`/register ${pw} ${pw}`);
-          addLog("[Auth] Sent /register");
-        } else {
-          bot.chat(`/login ${pw}`);
-          addLog("[Auth] Sent /login");
-        }
+        const cmd = type === "register" ? `/register ${pw} ${pw}` : `/login ${pw}`;
+        bot.chat(cmd);
+        addLog(`[Auth] Sent /${type}`);
       };
       bot.on("messagestr", msg => {
         if (done) return;
@@ -403,7 +473,7 @@ function initModules(bot, mcData, defMoves) {
         if (m.includes("/register") || m.includes("register ")) tryAuth("register");
         else if (m.includes("/login") || m.includes("login "))   tryAuth("login");
       });
-      // Failsafe: if no prompt in 10s, send /login anyway
+      // Failsafe in case server never sends login prompt
       setTimeout(() => {
         if (!done && bot && botState.connected) {
           addLog("[Auth] No prompt after 10s — /login failsafe");
@@ -414,196 +484,97 @@ function initModules(bot, mcData, defMoves) {
     }
   }
 
-  // Chat messages
-  if (cfg.utils["chat-messages"]?.enabled) {
+  // --- Periodic chat messages ---
+  if (cfg.utils["chat-messages"]?.enabled && cfg.utils["chat-messages"].repeat) {
     const msgs  = cfg.utils["chat-messages"].messages || [];
-    const delay = (cfg.utils["chat-messages"]["repeat-delay"] || 120) * 1000;
-    if (msgs.length && cfg.utils["chat-messages"].repeat) {
+    const delay = (cfg.utils["chat-messages"]["repeat-delay"] || 180) * 1000;
+    if (msgs.length) {
       let i = 0;
       addInterval(() => {
-        if (bot && botState.connected) {
-          bot.chat(msgs[i]);
-          i = (i + 1) % msgs.length;
-          botState.lastActivity = Date.now();
-        }
+        if (!bot || !botState.connected) return;
+        bot.chat(msgs[i]);
+        i = (i + 1) % msgs.length;
+        botState.lastActivity = Date.now();
       }, delay);
     }
   }
 
-  // Navigate to fixed position (disabled if circle-walk is on — they conflict)
-  const circleOn = cfg.movement?.["circle-walk"]?.enabled;
-  if (cfg.position?.enabled && !circleOn) {
-    bot.pathfinder.setMovements(defMoves);
-    bot.pathfinder.setGoal(new GoalBlock(cfg.position.x, cfg.position.y, cfg.position.z));
-    addLog("[Position] Navigating to configured position...");
-  }
-
-  // Anti-AFK actions
+  // --- Anti-AFK (safe movements only) ---
+  // *** KEY FIX: We ONLY use actions that cannot trigger invalid_player_movement:
+  //   - bot.look()            ✅ safe — just head rotation, no position change
+  //   - bot.swingArm()        ✅ safe — animation only
+  //   - bot.setQuickBarSlot() ✅ safe — inventory action
+  //   - setControlState jump  ✅ safe IF pathfinder is not simultaneously active
+  //   - setControlState sneak ✅ safe if brief
+  // We never use forward/back/left/right because pathfinder conflicts with them.
   if (cfg.utils["anti-afk"]?.enabled) {
-    // Swing arm
+
+    // Swing arm randomly (looks natural)
     addInterval(() => {
       if (!bot || !botState.connected) return;
       try { bot.swingArm(); } catch (_) {}
-    }, 10000 + Math.floor(Math.random() * 50000));
+    }, 12000 + Math.floor(Math.random() * 20000));
 
-    // Hotbar slot
+    // Change hotbar slot occasionally
     addInterval(() => {
       if (!bot || !botState.connected) return;
       try { bot.setQuickBarSlot(Math.floor(Math.random() * 9)); } catch (_) {}
-    }, 30000 + Math.floor(Math.random() * 90000));
+    }, 40000 + Math.floor(Math.random() * 50000));
 
-    // Teabag (sneak bursts, 10% chance each tick)
+    // Look around — 100% safe, zero movement
     addInterval(() => {
-      if (!bot || !botState.connected || Math.random() > 0.9) return;
-      let n = 2 + Math.floor(Math.random() * 4);
-      const tb = () => {
-        if (--n < 0 || !bot) return;
-        try {
-          bot.setControlState("sneak", true);
-          setTimeout(() => { if (bot) bot.setControlState("sneak", false); setTimeout(tb, 150); }, 150);
-        } catch (_) {}
-      };
-      tb();
-    }, 120000 + Math.floor(Math.random() * 180000));
+      if (!bot || !botState.connected) return;
+      try {
+        bot.look(
+          Math.random() * Math.PI * 2 - Math.PI,
+          (Math.random() * Math.PI) / 2 - Math.PI / 4,
+          false
+        );
+        botState.lastActivity = Date.now();
+      } catch (e) { addLog(`[AntiAFK] Look error: ${e.message}`); }
+    }, cfg.movement?.["look-around"]?.interval || 8000);
 
-    // Micro-walk (only when circle-walk isn't handling movement)
-    if (!circleOn) {
+    // Occasional jump — only when position module isn't using pathfinder
+    if (cfg.movement?.["random-jump"]?.enabled && !cfg.position?.enabled) {
       addInterval(() => {
         if (!bot || !botState.connected) return;
         try {
-          bot.look(Math.random() * Math.PI * 2, 0, true);
-          bot.setControlState("forward", true);
-          setTimeout(() => { if (bot) bot.setControlState("forward", false); },
-            500 + Math.floor(Math.random() * 1500));
+          bot.setControlState("jump", true);
+          setTimeout(() => { if (bot) bot.setControlState("jump", false); }, 250);
           botState.lastActivity = Date.now();
-        } catch (e) { addLog(`[AntiAFK] ${e.message}`); }
-      }, 120000 + Math.floor(Math.random() * 360000));
+        } catch (e) { addLog(`[AntiAFK] Jump error: ${e.message}`); }
+      }, cfg.movement?.["random-jump"]?.interval || 90000);
     }
 
-    if (cfg.utils["anti-afk"].sneak) {
-      try { bot.setControlState("sneak", true); } catch (_) {}
-    }
+    // Sneak briefly (teabag) — rare, keeps activity flag alive
+    addInterval(() => {
+      if (!bot || !botState.connected || Math.random() > 0.3) return;
+      try {
+        bot.setControlState("sneak", true);
+        setTimeout(() => { if (bot) bot.setControlState("sneak", false); }, 400);
+      } catch (_) {}
+    }, 150000 + Math.floor(Math.random() * 200000));
   }
 
-  // Movement modules
-  if (cfg.movement?.enabled !== false) {
-    if (circleOn)                                               startCircleWalk(bot, defMoves);
-    if (cfg.movement?.["random-jump"]?.enabled && !circleOn)   startRandomJump(bot);
-    if (cfg.movement?.["look-around"]?.enabled)                startLookAround(bot);
-  }
+  // --- Optional modules ---
+  if (cfg.modules.beds) modBeds(bot);
+  if (cfg.modules.chat) modChat(bot);
 
-  // Optional modules
-  if (cfg.modules.avoidMobs && !cfg.modules.combat) modAvoidMobs(bot);
-  if (cfg.modules.combat)                           modCombat(bot, mcData);
-  if (cfg.modules.beds)                             modBeds(bot);
-  if (cfg.modules.chat)                             modChat(bot);
-
-  addLog("[Modules] All initialized!");
+  // Note: combat and avoidMobs are intentionally NOT wired in here.
+  // Both modules use setControlState for movement which conflicts with
+  // pathfinder and causes invalid_player_movement kicks. Enable them only
+  // if you are not using any pathfinder-based movement simultaneously.
 }
 
 // ============================================================
-// MOVEMENT
+// BED MODULE
 // ============================================================
-function startCircleWalk(bot, defMoves) {
-  const { radius, speed } = config.movement["circle-walk"];
-  let angle = 0, lastPath = 0;
-  addInterval(() => {
-    if (!bot || !botState.connected) return;
-    const now = Date.now();
-    if (now - lastPath < 2000) return;
-    lastPath = now;
-    try {
-      const x = bot.entity.position.x + Math.cos(angle) * radius;
-      const z = bot.entity.position.z + Math.sin(angle) * radius;
-      bot.pathfinder.setMovements(defMoves);
-      bot.pathfinder.setGoal(new GoalBlock(
-        Math.floor(x), Math.floor(bot.entity.position.y), Math.floor(z)
-      ));
-      angle += Math.PI / 4;
-      botState.lastActivity = Date.now();
-    } catch (e) { addLog(`[CircleWalk] ${e.message}`); }
-  }, speed);
-}
-
-function startRandomJump(bot) {
-  addInterval(() => {
-    if (!bot || !botState.connected) return;
-    try {
-      bot.setControlState("jump", true);
-      setTimeout(() => { if (bot) bot.setControlState("jump", false); }, 300);
-      botState.lastActivity = Date.now();
-    } catch (e) { addLog(`[Jump] ${e.message}`); }
-  }, config.movement["random-jump"].interval);
-}
-
-function startLookAround(bot) {
-  addInterval(() => {
-    if (!bot || !botState.connected) return;
-    try {
-      bot.look(
-        Math.random() * Math.PI * 2 - Math.PI,
-        (Math.random() * Math.PI) / 2 - Math.PI / 4,
-        false
-      );
-      botState.lastActivity = Date.now();
-    } catch (e) { addLog(`[Look] ${e.message}`); }
-  }, config.movement["look-around"].interval);
-}
-
-// ============================================================
-// OPTIONAL MODULES
-// ============================================================
-function modAvoidMobs(bot) {
-  addInterval(() => {
-    if (!bot || !botState.connected) return;
-    try {
-      const close = Object.values(bot.entities).find(e =>
-        (e.type === "mob" || (e.type === "player" && e.username !== bot.username)) &&
-        e.position && bot.entity.position.distanceTo(e.position) < 5
-      );
-      if (close) {
-        bot.setControlState("back", true);
-        setTimeout(() => { if (bot) bot.setControlState("back", false); }, 500);
-      }
-    } catch (e) { addLog(`[AvoidMobs] ${e.message}`); }
-  }, 2000);
-}
-
-function modCombat(bot, mcData) {
-  let lastSwing = 0, target = null, targetExp = 0;
-  bot.on("physicsTick", () => {
-    if (!bot || !botState.connected || !config.combat["attack-mobs"]) return;
-    const now = Date.now();
-    if (now - lastSwing < 620) return;
-    try {
-      if (target && now < targetExp && bot.entities[target.id]?.position) {
-        if (bot.entity.position.distanceTo(target.position) < 4) {
-          bot.attack(target); lastSwing = now; return;
-        }
-        target = null;
-      }
-      const mob = Object.values(bot.entities).find(e =>
-        e.type === "mob" && e.position && bot.entity.position.distanceTo(e.position) < 4
-      );
-      if (mob) { target = mob; targetExp = now + 3000; bot.attack(mob); lastSwing = now; }
-    } catch (e) { addLog(`[Combat] ${e.message}`); }
-  });
-
-  bot.on("health", () => {
-    if (!config.combat["auto-eat"] || bot.food >= 14) return;
-    try {
-      const food = bot.inventory.items().find(i => i.foodPoints > 0);
-      if (food) bot.equip(food, "hand").then(() => bot.consume()).catch(e => addLog(`[AutoEat] ${e.message}`));
-    } catch (e) { addLog(`[AutoEat] ${e.message}`); }
-  });
-}
-
 function modBeds(bot) {
   let sleeping     = false;
   let wakeWatchdog = null;
-  const maxDist    = config.beds?.["max-search-distance"] || 32;
+  let lastNobedLog = 0; // throttle "no bed" spam — only log once per night
+  const maxDist    = config.beds?.["max-search-distance"] || 16;
 
-  // Once night is skipped, wake the bot after a short delay
   function scheduleWake() {
     if (wakeWatchdog) clearTimeout(wakeWatchdog);
     wakeWatchdog = setTimeout(async () => {
@@ -614,13 +585,12 @@ function modBeds(bot) {
       } catch (e) {
         addLog(`[Bed] Wake error: ${e.message}`);
       } finally {
-        sleeping = false;
+        sleeping     = false;
         wakeWatchdog = null;
       }
     }, 12000);
   }
 
-  // Try to sleep every 10s during night
   addInterval(async () => {
     if (!bot || !botState.connected) return;
     if (!config.beds?.["place-night"]) return;
@@ -628,28 +598,33 @@ function modBeds(bot) {
 
     const tod     = bot.time.timeOfDay;
     const isNight = tod >= 12541 && tod <= 23458;
-    if (!isNight) return;
+    if (!isNight) { lastNobedLog = 0; return; } // reset log timer each day
 
     const bed = bot.findBlock({
       matching:     b => b.name.includes("bed"),
       maxDistance:  maxDist,
       useExtraInfo: false,
     });
+
     if (!bed) {
-      addLog(`[Bed] No bed within ${maxDist} blocks — can't sleep`);
+      // Only log once per night cycle to avoid filling the log
+      const now = Date.now();
+      if (now - lastNobedLog > 120000) {
+        addLog(`[Bed] No bed within ${maxDist} blocks — place one near spawn!`);
+        lastNobedLog = now;
+      }
       return;
     }
 
     sleeping = true;
     try {
       await bot.sleep(bed);
-      addLog("[Bed] Bot is sleeping");
+      addLog("[Bed] Sleeping...");
       scheduleWake();
     } catch (e) {
       const msg = e.message || String(e);
       if (/already sleep/i.test(msg)) {
-        // Another player triggered the skip — we still need to wake after
-        addLog("[Bed] Night already being skipped by another player");
+        addLog("[Bed] Night being skipped by another player");
         scheduleWake();
       } else if (/can't sleep|not a bed/i.test(msg)) {
         addLog(`[Bed] Can't sleep right now: ${msg}`);
@@ -661,30 +636,96 @@ function modBeds(bot) {
     }
   }, 10000);
 
-  // Failsafe: sync our flag with mineflayer's actual state
+  // Desync failsafe — reset flag if mineflayer says we're not sleeping
   addInterval(() => {
     if (!bot || !botState.connected) return;
     if (sleeping && !bot.isSleeping) {
-      addLog("[Bed] Sleep state desynced — resetting");
+      addLog("[Bed] State desynced — resetting");
       sleeping = false;
       if (wakeWatchdog) { clearTimeout(wakeWatchdog); wakeWatchdog = null; }
     }
   }, 15000);
 }
 
+// ============================================================
+// CHAT MODULE + GROQ AI
+// ============================================================
+const aiHistory = []; // rolling conversation context
+const MAX_AI_HISTORY = 10;
+
+async function askGroq(username, message) {
+  if (!GROQ_KEY) return null;
+
+  aiHistory.push({ role: "user", content: `${username} said: ${message}` });
+  if (aiHistory.length > MAX_AI_HISTORY)
+    aiHistory.splice(0, aiHistory.length - MAX_AI_HISTORY);
+
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method:  "POST",
+      headers: {
+        "Authorization": `Bearer ${GROQ_KEY}`,
+        "Content-Type":  "application/json",
+      },
+      body: JSON.stringify({
+        model:      "llama-3.1-8b-instant",
+        max_tokens: 60,
+        messages: [
+          {
+            role:    "system",
+            content: `You are ${config["bot-account"].username}, a chill Minecraft survival player. Reply in ONE short sentence max. Be casual, a little funny, and in-character. Never reveal you're an AI or a bot.`,
+          },
+          ...aiHistory,
+        ],
+      }),
+    });
+
+    const data  = await res.json();
+    const reply = data.choices?.[0]?.message?.content?.trim();
+    if (reply) aiHistory.push({ role: "assistant", content: reply });
+    return reply || null;
+  } catch (e) {
+    addLog(`[AI] Groq error: ${e.message}`);
+    return null;
+  }
+}
+
 function modChat(bot) {
-  bot.on("chat", (username, message) => {
+  const replyCooldowns = new Map(); // per-user 5s cooldown
+
+  bot.on("chat", async (username, message) => {
     if (!bot || username === bot.username) return;
-    try {
-      if (config.discord?.events?.chat) sendDiscord(`💬 **${username}**: ${message}`, 0x7289da);
-      if (!config.chat?.respond) return;
-      const m = message.toLowerCase();
-      if (m.includes("hello") || m.includes("hi")) bot.chat(`Hey ${username}!`);
-      if (message.startsWith("!tp ")) {
-        const t = message.split(" ")[1];
-        if (t) bot.chat(`/tp ${t}`);
-      }
-    } catch (e) { addLog(`[Chat] ${e.message}`); }
+
+    // Log chat to Discord if configured
+    if (config.discord?.events?.chat)
+      sendDiscord(`💬 **${username}**: ${message}`, 0x7289da);
+
+    if (!config.chat?.respond) return;
+
+    // Per-user cooldown — don't spam replies
+    const now  = Date.now();
+    const last = replyCooldowns.get(username) || 0;
+    if (now - last < 5000) return;
+    replyCooldowns.set(username, now);
+
+    // Try Groq AI first (if key is set), fall back to keyword responses
+    const aiReply = await askGroq(username, message);
+    if (aiReply) {
+      // Small delay makes it feel human
+      setTimeout(() => {
+        if (bot && botState.connected) bot.chat(aiReply);
+      }, 1000 + Math.floor(Math.random() * 1500));
+      return;
+    }
+
+    // Fallback keyword responses when no AI key is set
+    const m = message.toLowerCase();
+    if (m.includes("hello") || m.includes("hi") || m.includes("hey"))
+      bot.chat(`hey ${username}!`);
+    else if (m.includes("how are you") || m.includes("what's up"))
+      bot.chat("just vibing tbh");
+    else if (m.includes("where are you"))
+      bot.chat("somewhere... probably");
   });
 }
 
@@ -693,8 +734,11 @@ function modChat(bot) {
 // ============================================================
 let lastDiscord = 0;
 function sendDiscord(content, color = 0x0099ff) {
-  if (!config.discord?.enabled || !config.discord?.webhookUrl ||
-      config.discord.webhookUrl.includes("YOUR_DISCORD")) return;
+  if (
+    !config.discord?.enabled ||
+    !config.discord?.webhookUrl ||
+    config.discord.webhookUrl.includes("YOUR_DISCORD")
+  ) return;
   if (!(config.discord.events?.connect || config.discord.events?.disconnect)) return;
   const now = Date.now();
   if (now - lastDiscord < 5000) return;
@@ -702,51 +746,62 @@ function sendDiscord(content, color = 0x0099ff) {
 
   const payload = JSON.stringify({
     username: config.name,
-    embeds: [{ description: content, color, timestamp: new Date().toISOString(), footer: { text: "AFK Bot" } }],
+    embeds: [{
+      description: content,
+      color,
+      timestamp: new Date().toISOString(),
+      footer: { text: "AFK Bot v2.7" },
+    }],
   });
   try {
     const u     = new URL(config.discord.webhookUrl);
     const proto = config.discord.webhookUrl.startsWith("https") ? https : http;
     const req   = proto.request({
-      hostname: u.hostname, port: 443, path: u.pathname + u.search, method: "POST",
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload, "utf8") },
+      hostname: u.hostname,
+      port:     443,
+      path:     u.pathname + u.search,
+      method:   "POST",
+      headers: {
+        "Content-Type":   "application/json",
+        "Content-Length": Buffer.byteLength(payload, "utf8"),
+      },
     });
     req.on("error", e => addLog(`[Discord] ${e.message}`));
     req.write(payload);
     req.end();
-  } catch (e) { addLog(`[Discord] ${e.message}`); }
+  } catch (e) {
+    addLog(`[Discord] ${e.message}`);
+  }
 }
 
 // ============================================================
-// STDIN CONSOLE
+// STDIN CONSOLE (for local dev)
 // ============================================================
-readline.createInterface({ input: process.stdin, terminal: false })
+readline
+  .createInterface({ input: process.stdin, terminal: false })
   .on("line", line => {
     const cmd = line.trim();
     if (!bot || !botState.connected) { addLog("[Console] Bot not connected"); return; }
-    try {
-      if (cmd.startsWith("say "))    bot.chat(cmd.slice(4));
-      else if (cmd.startsWith("cmd ")) bot.chat("/" + cmd.slice(4));
-      else if (cmd === "status")      addLog(`Up: ${fmtUptime(Math.floor((Date.now() - botState.startTime) / 1000))} | Reconnects: ${botState.reconnectAttempts}`);
-      else                            bot.chat(cmd);
-    } catch (e) { addLog(`[Console] ${e.message}`); }
+    try { bot.chat(cmd); } catch (e) { addLog(`[Console] ${e.message}`); }
   });
 
 // ============================================================
 // CRASH RECOVERY
 // ============================================================
-const NETWORK_RE = /PartialReadError|ECONNRESET|EPIPE|ETIMEDOUT|write after end|socket has been ended/i;
+const NETWORK_RE =
+  /PartialReadError|ECONNRESET|EPIPE|ETIMEDOUT|write after end|socket has been ended/i;
 
 process.on("uncaughtException", err => {
   addLog(`[FATAL] Uncaught: ${err.message}`);
   pushError("uncaught", err.message);
+  stopAllMovement();
   clearAllIntervals();
   botState.connected = false;
-  if (isReconnecting) {
-    isReconnecting = false;
-    clearTimers();
-  }
-  setTimeout(() => scheduleReconnect(), NETWORK_RE.test(err.message) ? 5000 : 10000);
+  if (isReconnecting) { isReconnecting = false; clearTimers(); }
+  setTimeout(
+    () => scheduleReconnect(),
+    NETWORK_RE.test(err.message) ? 5000 : 10000
+  );
 });
 
 process.on("unhandledRejection", reason => {
@@ -754,6 +809,7 @@ process.on("unhandledRejection", reason => {
   addLog(`[FATAL] Unhandled rejection: ${msg}`);
   pushError("rejection", msg);
   if (NETWORK_RE.test(msg) && !isReconnecting) {
+    stopAllMovement();
     clearAllIntervals();
     botState.connected = false;
     if (bot) { try { bot.end(); } catch (_) {} bot = null; }
@@ -761,9 +817,9 @@ process.on("unhandledRejection", reason => {
   }
 });
 
-// Graceful shutdown — Render sends SIGTERM before killing the process
 process.on("SIGTERM", () => {
   addLog("[System] SIGTERM — shutting down gracefully");
+  stopAllMovement();
   if (bot) { try { bot.end(); } catch (_) {} }
   httpServer.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 5000);
@@ -771,12 +827,13 @@ process.on("SIGTERM", () => {
 
 process.on("SIGINT", () => {
   addLog("[System] SIGINT — stopping");
+  stopAllMovement();
   if (bot) { try { bot.end(); } catch (_) {} }
   process.exit(0);
 });
 
 // ============================================================
-// HTML TEMPLATES (kept in index.js for single-file deploy)
+// HTML TEMPLATES
 // ============================================================
 const GFONT = `<link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">`;
 const CSS = `
@@ -794,7 +851,7 @@ function dashboardHTML() {
 <head><title>${config.name} Dashboard</title><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${GFONT}
 <style>${CSS}
 body{display:flex;justify-content:center;align-items:center;min-height:100vh;padding:24px}
-main{width:100%;max-width:400px}header{margin-bottom:28px}
+main{width:100%;max-width:420px}header{margin-bottom:28px}
 .sb{border-radius:12px;padding:20px 24px;margin-bottom:16px;display:flex;align-items:center;gap:16px;transition:background .3s,border-color .3s}
 .sb.on{background:#0d2218;border:2px solid #238636}.sb.off{background:#200d0d;border:2px solid #da3633}
 .si{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
@@ -810,14 +867,17 @@ dt{font-size:12px;color:#8b949e;font-weight:600;margin-bottom:4px}dd{margin:0;fo
 .lnk{min-height:44px;border-radius:10px;border:1px solid #21262d;background:#161b22;color:#8b949e;font-size:13px;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s}
 .lnk:hover{background:#21262d;color:#c9d1d9;text-decoration:none}
 footer{margin-top:20px;text-align:center}footer p{font-size:12px;color:#484f58;margin:0}
+.ai-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;margin-top:8px}
+.ai-on{background:#0d2218;border:1px solid #238636;color:#3fb950}
+.ai-off{background:#1a1a2e;border:1px solid #30363d;color:#484f58}
 </style></head>
 <body><main>
-<header><h1>AFK Bot Dashboard</h1><p class="sub">Minecraft server bot · Live status</p></header>
+<header><h1>${config.name} Dashboard</h1><p class="sub">Minecraft AFK bot · v2.7</p></header>
 <div id="sb" class="sb off"><div id="si" class="si off">✗</div><div><div id="sl" class="sl off">Connecting…</div><div id="sd" class="sd">Establishing connection</div></div></div>
 <dl>
-  <div class="card"><dt>Uptime</dt><dd id="up">—</dd><p class="note">Since last connection</p></div>
-  <div class="card"><dt>Coordinates</dt><dd id="xy">Searching…</dd><p class="note">Bot's in-game position</p></div>
-  <div class="card"><dt>Server</dt><dd>${config.server.ip}</dd><p class="note">Minecraft hostname</p></div>
+  <div class="card"><dt>Uptime</dt><dd id="up">—</dd><p class="note">Since process start</p></div>
+  <div class="card"><dt>Coordinates</dt><dd id="xy">Searching…</dd><p class="note">Bot in-game position</p></div>
+  <div class="card"><dt>Server</dt><dd>${config.server.ip}</dd><p class="note" id="ai-status">AI chat: checking…</p></div>
 </dl>
 <div class="g2">
   <button class="btn go" onclick="ctrl('/start')">Start</button>
@@ -832,15 +892,17 @@ footer{margin-top:20px;text-align:center}footer p{font-size:12px;color:#484f58;m
 <script>
 function fmt(s){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;return h?h+'h '+m+'m '+sec+'s':m?m+'m '+sec+'s':sec+'s';}
 async function tick(){
-  try{const d=await fetch('/health').then(r=>r.json()),on=d.status==='connected';
-  document.getElementById('sb').className='sb '+(on?'on':'off');
-  document.getElementById('si').className='si '+(on?'on':'off');
-  document.getElementById('si').textContent=on?'✓':'✗';
-  document.getElementById('sl').className='sl '+(on?'on':'off');
-  document.getElementById('sl').textContent=on?'Connected':'Disconnected';
-  document.getElementById('sd').textContent=on?'Bot is active':'Attempting to reconnect';
-  document.getElementById('up').textContent=fmt(d.uptime);
-  if(d.coords){const p=d.coords;document.getElementById('xy').textContent='X '+Math.floor(p.x)+' Y '+Math.floor(p.y)+' Z '+Math.floor(p.z);}
+  try{
+    const d=await fetch('/health').then(r=>r.json()),on=d.status==='connected';
+    document.getElementById('sb').className='sb '+(on?'on':'off');
+    document.getElementById('si').className='si '+(on?'on':'off');
+    document.getElementById('si').textContent=on?'✓':'✗';
+    document.getElementById('sl').className='sl '+(on?'on':'off');
+    document.getElementById('sl').textContent=on?'Connected':'Disconnected';
+    document.getElementById('sd').textContent=on?'Bot is active on server':'Attempting to reconnect…';
+    document.getElementById('up').textContent=fmt(d.uptime);
+    if(d.coords){const p=d.coords;document.getElementById('xy').textContent='X '+Math.floor(p.x)+' Y '+Math.floor(p.y)+' Z '+Math.floor(p.z);}
+    document.getElementById('ai-status').textContent=d.groqEnabled?'AI chat: enabled (Groq)':'AI chat: disabled (set GROQ_API_KEY)';
   }catch(e){document.getElementById('sl').textContent='Unreachable';}
 }
 async function ctrl(url){const d=await fetch(url,{method:'POST'}).then(r=>r.json());alert(d.success?'Done!':d.msg);tick();}
@@ -869,32 +931,25 @@ footer{margin-top:32px;text-align:center}footer p{font-size:12px;color:#484f58}
 <div class="card"><div class="ch"><div class="num">1</div><h2>Configure Aternos</h2></div>
 <ul>
   <li>Go to <strong>Aternos → Options</strong></li>
-  <li>Set <strong>online-mode</strong> → <strong>false</strong> (cracked/offline mode)</li>
+  <li>Set <strong>online-mode</strong> → <strong>false</strong></li>
   <li>Enable <strong>whitelist</strong> and add your bot's username</li>
-  <li>If your server version mismatches, install <code>ViaVersion</code></li>
+  <li><strong>Place a bed within 16 blocks of spawn</strong> so the bot can sleep at night</li>
 </ul></div>
-<div class="card"><div class="ch"><div class="num">2</div><h2>Set credentials via env vars</h2></div>
+<div class="card"><div class="ch"><div class="num">2</div><h2>Railway env vars</h2></div>
 <ul>
-  <li>Set <code>MC_HOST</code> and <code>MC_PORT</code> for your server</li>
-  <li>Set <code>BOT_USERNAME</code> to any offline username</li>
-  <li>Set <code>AUTH_PASSWORD</code> if using auto-auth plugin</li>
-  <li><strong>Never commit passwords to a public GitHub repo</strong></li>
+  <li>Set <code>MC_HOST</code> and <code>MC_PORT</code> (check Aternos dashboard after each restart)</li>
+  <li>Set <code>BOT_USERNAME</code> to any offline-mode username</li>
+  <li>Set <code>APP_URL</code> to your Railway service URL to enable self-ping</li>
+  <li><strong>Optional:</strong> Set <code>GROQ_API_KEY</code> for AI chat responses (free at console.groq.com)</li>
 </ul></div>
-<div class="card"><div class="ch"><div class="num">3</div><h2>Deploy free on Fly.io (recommended)</h2></div>
+<div class="card"><div class="ch"><div class="num">3</div><h2>Why movement is disabled</h2></div>
 <ul>
-  <li>Install <code>flyctl</code>, run <code>fly launch</code> in project folder</li>
-  <li>Set secrets: <code>fly secrets set AUTH_PASSWORD=xxx</code></li>
-  <li>Deploy: <code>fly deploy</code></li>
-  <li>Free tier: 256MB RAM VMs, no sleep, no time limits</li>
+  <li>Aternos 1.21.x anti-cheat kicks bots that move unnaturally (pathfinder teleports)</li>
+  <li>This version uses <strong>look-around, arm-swing, and rare jumps only</strong> — all safe</li>
+  <li>Bot stays still but swings arms and looks around to avoid AFK detection</li>
+  <li>If you need a bed to sleep, place it near where the bot spawns</li>
 </ul></div>
-<div class="card"><div class="ch"><div class="num">4</div><h2>Or deploy on Render (alternative)</h2></div>
-<ul>
-  <li>Connect GitHub repo → New Web Service → set env vars in dashboard</li>
-  <li>Set <code>RENDER_EXTERNAL_URL</code> to your Render service URL</li>
-  <li>Self-ping keeps it awake every 10 min</li>
-  <li>Free tier: 750 hrs/month — just enough for 24/7 single service</li>
-</ul></div>
-<footer><p>AFK Bot · ${config.name}</p></footer>
+<footer><p>AFK Bot v2.7</p></footer>
 </main></body></html>`;
 }
 
@@ -905,10 +960,10 @@ function logsHTML() {
     : logs.map(l => {
         const e = escHTML(l), lo = l.toLowerCase();
         let c = "df";
-        if (/error|fail|fatal/.test(lo))          c = "er";
-        else if (lo.includes("warn"))             c = "wa";
+        if (/error|fail|fatal/.test(lo))             c = "er";
+        else if (lo.includes("warn"))                c = "wa";
         else if (/\[control\]|\[console\]/.test(lo)) c = "ct";
-        else if (/spawn|connect|\[\+\]/.test(lo)) c = "ok";
+        else if (/spawn|connect|\[\+\]/.test(lo))    c = "ok";
         return `<span class="le ${c}">${e}</span>`;
       }).join("");
 
@@ -945,7 +1000,7 @@ footer{margin-top:32px;text-align:center}footer p{font-size:12px;color:#484f58}
 </style></head>
 <body><main>
 <a href="/" class="back">← Back to Dashboard</a>
-<div class="ph"><div><h1>Bot Logs</h1><p class="sub">Live output</p></div><span class="badge">${logs.length} ${logs.length===1?"entry":"entries"}</span></div>
+<div class="ph"><div><h1>Bot Logs</h1><p class="sub">Live output</p></div><span class="badge">${logs.length} ${logs.length === 1 ? "entry" : "entries"}</span></div>
 <div class="lc">
   <div class="lh"><span class="d dr"></span><span class="d dy"></span><span class="d dg"></span><span class="lt">bot.log</span></div>
   <div class="lb" id="lb">${items}</div>
@@ -953,13 +1008,13 @@ footer{margin-top:32px;text-align:center}footer p{font-size:12px;color:#484f58}
     <div class="sg" id="sg"></div>
     <div class="cr">
       <span class="pr">&gt;</span>
-      <input id="ci" class="ci" type="text" placeholder="/ for commands or any message…" autocomplete="off" spellcheck="false">
+      <input id="ci" class="ci" type="text" placeholder="/ for commands or chat…" autocomplete="off" spellcheck="false">
       <button id="cs" class="cs">Send</button>
     </div>
   </div>
 </div>
 <div class="rf"><span class="pulse"></span><span id="rl">Auto-refreshing every 5 seconds</span></div>
-<footer><p>AFK Bot · ${config.name}</p></footer>
+<footer><p>AFK Bot v2.7</p></footer>
 </main>
 <script>
 (function(){
@@ -1008,11 +1063,12 @@ sb();sched();
 // START
 // ============================================================
 addLog("=".repeat(50));
-addLog("  Minecraft AFK Bot v2.6");
+addLog("  Minecraft AFK Bot v2.7");
 addLog("=".repeat(50));
 addLog(`Server:  ${config.server.ip}:${config.server.port}`);
 addLog(`Version: ${config.server.version || "auto-detect"}`);
 addLog(`Reconnect: ${config.utils["auto-reconnect"] ? "Enabled" : "Disabled"}`);
+addLog(`Groq AI: ${GROQ_KEY ? "Enabled" : "Disabled (set GROQ_API_KEY to enable)"}`);
 addLog("=".repeat(50));
 
 validateConfig();

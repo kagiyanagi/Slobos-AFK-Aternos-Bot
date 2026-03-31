@@ -1,25 +1,35 @@
 {
   "name": "AFK Bot",
+
   "bot-account": {
     "username": "bhai",
     "password": "",
     "type": "offline"
   },
+
   "server": {
     "ip": "kagiyanagi.aternos.me",
     "port": 14021,
     "version": false,
     "try-creative": false
   },
+
   "position": {
     "enabled": false,
     "x": 0,
     "y": 64,
     "z": 0
   },
+
   "utils": {
-    "auto-auth": { "enabled": false, "password": "" },
-    "anti-afk":  { "enabled": true,  "sneak": false },
+    "auto-auth": {
+      "enabled": false,
+      "password": ""
+    },
+    "anti-afk": {
+      "enabled": true,
+      "sneak": false
+    },
     "chat-messages": {
       "enabled": true,
       "repeat": true,
@@ -39,7 +49,7 @@
         "AFK but still judging your build.",
         "Totally knows what they're doing.",
         "Searching for diamonds since 2012.",
-        "That wasn't lava… oh wait.",
+        "That wasn't lava... oh wait.",
         "Fell into the void (again).",
         "Speedrunning bad decisions.",
         "Just farming... not your stuff tho.",
@@ -48,20 +58,20 @@
         "Trying not to rage quit.",
         "This base is temporary... for 3 months now.",
         "Villagers hate me for no reason.",
-        "Redstone broke again 💀",
+        "Redstone broke again!",
         "Just vibing in the Nether.",
         "Lost all my stuff, nice.",
         "Parkour skills = 0",
         "Totally didn't cheat that in.",
         "One heart clutch incoming!",
         "Just exploring... and dying.",
-        "This is fine 🔥",
+        "This is fine",
         "Mining for diamonds, finding disappointment.",
         "Trust me, this will look good later.",
         "Not lost, just... exploring inefficiently.",
         "I swear I had full armor a minute ago.",
         "Who placed this lava here??",
-        "Just a peaceful day… *explosion*",
+        "Just a peaceful day... *explosion*",
         "Grinding XP like my life depends on it.",
         "I hear skeletons... I don't like it.",
         "Building a house I'll never finish."
@@ -72,6 +82,7 @@
     "auto-reconnect-delay": 3000,
     "max-reconnect-delay": 120000
   },
+
   "movement": {
     "enabled": true,
     "circle-walk": {
@@ -81,13 +92,14 @@
     },
     "look-around": {
       "enabled": true,
-      "interval": 5000
+      "interval": 8000
     },
     "random-jump": {
       "enabled": true,
-      "interval": 10000
+      "interval": 90000
     }
   },
+
   "modules": {
     "avoidMobs": false,
     "combat": false,
@@ -95,15 +107,18 @@
     "chat": true,
     "console-commands": true
   },
+
   "combat": {
     "attack-mobs": false,
     "auto-eat": false
   },
+
   "beds": {
     "pick-up-day": false,
     "place-night": true,
-    "max-search-distance": 32
+    "max-search-distance": 16
   },
+
   "discord": {
     "enabled": false,
     "webhookUrl": "YOUR_DISCORD_WEBHOOK_URL_HERE",
@@ -113,7 +128,8 @@
       "chat": false
     }
   },
+
   "chat": {
-    "respond": false
+    "respond": true
   }
 }
